@@ -3,15 +3,18 @@
 
 #include <ranges>
 
+#include "common/elf_info.h"
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/memory.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
+#include "shader_recompiler/skate_shader_patch.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -628,7 +631,26 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+    std::vector<u32> skate_code;
+    if (Common::ElfInfo::Instance().GameSerial() == "CUSA37423") {
+        skate_code = Shader::Gcn::PatchSkateJumpTable(code, info.pgm_hash);
+        if (skate_code.empty()) {
+            skate_code = Shader::Gcn::PatchSkateRuntimeJumpTable(
+                code, [&](u32 offset, std::span<u32> destination) {
+                    const auto address = reinterpret_cast<uintptr_t>(code.data());
+                    return Core::Memory::Instance()->ReadMappedBytes(
+                        address + offset,
+                        {reinterpret_cast<u8*>(destination.data()), destination.size_bytes()});
+                });
+        }
+        if (!skate_code.empty()) {
+            LOG_WARNING(Render_Recompiler, "Applied skate. jump-table workaround to {:#x}",
+                        info.pgm_hash);
+        }
+    }
+    const std::span<const u32> translated_code = skate_code.empty() ? code : skate_code;
+    const auto ir_program =
+        Shader::TranslateProgram(translated_code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
