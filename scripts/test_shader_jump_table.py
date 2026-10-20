@@ -41,6 +41,13 @@ class JumpTableTests(unittest.TestCase):
     def test_truncated_final_entry_is_incomplete(self):
         self.assertFalse(inspect(fixture()[:-1], 40, 44)['complete'])
 
+    def test_preserves_carry_in_pc_relative_table_offset(self):
+        blob = fixture()
+        struct.pack_into('<I', blob, 16, 0xffff_fff4)
+        result = inspect(blob, 40, 44)
+        self.assertEqual(result['table_offset'], 0x1_0000_0000)
+        self.assertFalse(result['complete'])
+
     def test_rejects_missing_carry_and_borrow(self):
         for offset in (20, 36):
             with self.subTest(offset=offset):

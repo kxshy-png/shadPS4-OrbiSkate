@@ -71,7 +71,7 @@ def inspect(data, branch_pc, code_size):
         raise ValueError('Invalid table bound')
     if index in (pair, pair + 1) or loaded in (pair, pair + 1):
         raise ValueError('Table index or loaded displacement clobbers the PC base')
-    table = (getpc_pc + 4 + addend) & 0xffff_ffff
+    table = getpc_pc + 4 + addend
     count = maximum + 1
     required = table + count * 4
     result = {
@@ -82,10 +82,10 @@ def inspect(data, branch_pc, code_size):
     if not result['complete']:
         return result
     offsets = [word(data, table + i * 4) for i in range(count)]
-    targets = [(table - offset) & 0xffff_ffff for offset in offsets]
+    targets = [table - offset for offset in offsets]
     result['displacements'] = offsets
     result['targets'] = targets
-    result['targets_aligned_and_in_code'] = all(t % 4 == 0 and t < code_size for t in targets)
+    result['targets_aligned_and_in_code'] = all(0 <= t < code_size and t % 4 == 0 for t in targets)
     return result
 
 
