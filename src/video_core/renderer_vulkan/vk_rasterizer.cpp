@@ -976,10 +976,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 
     u32 image_info_idx = first_image_idx;
-    u32 image_binding_idx = 0;
-    for (u32 array_size : image_descriptor_array_sizes) {
-        const auto& [_, desc] = image_bindings[image_binding_idx];
-        const bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
+    for (u32 i = 0; i < stage.images.size(); ++i) {
+        const u32 array_size = image_descriptor_array_sizes[i];
+        const bool is_storage = stage.images[i].is_written;
         auto& set_write = set_writes[set_write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
         set_write.dstBinding = binding.unified;
@@ -990,7 +989,6 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         set_write.pImageInfo = &image_infos[image_info_idx];
 
         image_info_idx += array_size;
-        image_binding_idx += array_size;
         binding.unified += array_size;
     }
 
