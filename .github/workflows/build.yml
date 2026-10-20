@@ -140,6 +140,14 @@ jobs:
         run: cmake --build build
         shell: bash
 
+      - name: Upload Windows GPU test runner
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: shadps4-windows-gpu-tests
+          path: build/tests/shadps4_gcn_test.exe
+          if-no-files-found: error
+
       - name: Run tests with CTest
         run: ctest --test-dir build --output-on-failure --progress -E 'GcnTest'
         shell: bash
