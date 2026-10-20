@@ -152,6 +152,10 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Calculate source cache key
+      id: source-cache
+      run: echo "key=${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}" >> $env:GITHUB_OUTPUT
+
     - name: Cache CMake Configuration
       uses: actions/cache@v5
       env:
@@ -159,7 +163,7 @@ jobs:
       with:
           path: |
             ${{github.workspace}}/build
-          key: ${{ env.cache-name }}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+          key: ${{ env.cache-name }}-${{ steps.source-cache.outputs.key }}
           restore-keys: |
             ${{ env.cache-name }}-
 
@@ -169,7 +173,7 @@ jobs:
           cache-name: ${{ runner.os }}-sdl-cache-cmake-build
       with:
         append-timestamp: false
-        key: ${{ env.cache-name }}-${{ hashFiles('**/CMakeLists.txt', 'cmake/**') }}
+        key: ${{ env.cache-name }}-${{ steps.source-cache.outputs.key }}
 
     - name: Print CPU Info
       run: bash -c "cat /proc/cpuinfo"
