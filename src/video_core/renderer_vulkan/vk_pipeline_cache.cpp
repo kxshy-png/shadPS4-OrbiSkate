@@ -15,6 +15,7 @@
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
 #include "shader_recompiler/skate_shader_patch.h"
+#include "shader_recompiler/skate_spirv_patch.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -652,6 +653,21 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     const auto ir_program =
         Shader::TranslateProgram(translated_code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    if (Common::ElfInfo::Instance().GameSerial() == "CUSA37423" && profile.subgroup_size == 32 &&
+        !instance.IsSubgroupSize64Supported() && info.hw_stage == HwStage::Fragment &&
+        info.pgm_hash == 0x893aad98 && code.size_bytes() == 8860) {
+        u64 fingerprint = 0xcbf29ce484222325;
+        for (const u32 word : code) {
+            for (u32 shift = 0; shift < 32; shift += 8) {
+                fingerprint = (fingerprint ^ ((word >> shift) & 0xff)) * 0x100000001b3;
+            }
+        }
+        if (fingerprint == 0x432dbec654433b76 && Shader::BoundSkateFragmentLoops(spv)) {
+            LOG_WARNING(Render_Recompiler,
+                        "Applied skate. fragment loop limit (64 iterations) to {:#x}",
+                        info.pgm_hash);
+        }
+    }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;
