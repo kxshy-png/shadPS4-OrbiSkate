@@ -102,7 +102,7 @@
 	url = https://github.com/richgel999/miniz
 [submodule "externals/aacdec/fdk-aac"]
 	path = externals/aacdec/fdk-aac
-	url = https://android.googlesource.com/platform/external/aac
+	url = https://github.com/aosp-mirror-neo/platform_external_aac.git
 [submodule "externals/freetype"]
 	path = externals/freetype
 	url = https://github.com/freetype/freetype.git
