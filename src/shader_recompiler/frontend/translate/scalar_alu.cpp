@@ -116,6 +116,8 @@ void Translator::EmitScalarAlu(const GcnInst& inst) {
             return S_FLBIT_I32_B32(inst);
         case Opcode::S_FLBIT_I32_B64:
             return S_FLBIT_I32_B64(inst);
+        case Opcode::S_FLBIT_I32:
+            return V_FFBH_I32(inst);
         case Opcode::S_BITSET0_B32:
             return S_BITSET_B32(inst, 0);
         case Opcode::S_BITSET1_B32:
