@@ -11,7 +11,6 @@
 #include "shader_recompiler/ir/program.h"
 #include "shader_recompiler/profile.h"
 #include "shader_recompiler/recompiler.h"
-#include "shader_recompiler/skate_shader_patch.h"
 
 namespace Shader {
 
@@ -69,18 +68,12 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
         LOG_WARNING(Render_Recompiler, "First instruction is not s_mov_b32 vcc_hi, #imm");
     }
 
-    const auto patched_code = Gcn::PatchSkateJumpTable(code, info.pgm_hash);
-    const std::span<const u32> decoded_code = patched_code.empty() ? code : patched_code;
-    if (!patched_code.empty()) {
-        LOG_WARNING(Render_Recompiler, "Applied skate. v1.29 jump-table workaround to {:#x}",
-                    info.pgm_hash);
-    }
-    Gcn::GcnCodeSlice slice(decoded_code.data(), decoded_code.data() + decoded_code.size());
+    Gcn::GcnCodeSlice slice(code.data(), code.data() + code.size());
     Gcn::GcnDecodeContext decoder;
 
     // Decode and save instructions
     IR::Program program{info};
-    program.ins_list.reserve(decoded_code.size());
+    program.ins_list.reserve(code.size());
     while (!slice.atEnd()) {
         program.ins_list.emplace_back(decoder.decodeInstruction(slice));
     }
