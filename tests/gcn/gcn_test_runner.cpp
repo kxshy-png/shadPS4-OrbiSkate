@@ -223,10 +223,12 @@ std::expected<void, ErrorInfo> Runner::initialize() {
     };
     vk::PhysicalDeviceVulkan11Features v11_feat{
         .pNext = &m6_feat,
+        .storageBuffer16BitAccess = VK_TRUE,
         .uniformAndStorageBuffer16BitAccess = VK_TRUE,
     };
     vk::PhysicalDeviceVulkan12Features v12_feat{
         .pNext = &v11_feat,
+        .storageBuffer8BitAccess = VK_TRUE,
         .uniformAndStorageBuffer8BitAccess = VK_TRUE,
         .shaderFloat16 = VK_TRUE,
         .shaderInt8 = VK_TRUE,
@@ -278,19 +280,19 @@ std::expected<void, ErrorInfo> Runner::initialize() {
     fence_ = fence;
 
     // ---- Descriptor set layout with push-descriptor flag --------------
-    // Single storage buffer at binding 0. No descriptor sets are ever
-    // allocated from this layout — the layout is just used to tell the
-    // pipeline layout and shader what the push-descriptor shape is.
-    vk::DescriptorSetLayoutBinding dsl_binding{
-        .binding = 0,
-        .descriptorType = vk::DescriptorType::eStorageBuffer,
-        .descriptorCount = 1,
-        .stageFlags = vk::ShaderStageFlagBits::eCompute,
-    };
+    std::array<vk::DescriptorSetLayoutBinding, 2> dsl_bindings{};
+    for (std::uint32_t i = 0; i < dsl_bindings.size(); ++i) {
+        dsl_bindings[i] = {
+            .binding = i,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .descriptorCount = 1,
+            .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        };
+    }
     auto [dslr, dsl] = device_.createDescriptorSetLayout({
         .flags = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR,
-        .bindingCount = 1,
-        .pBindings = &dsl_binding,
+        .bindingCount = static_cast<std::uint32_t>(dsl_bindings.size()),
+        .pBindings = dsl_bindings.data(),
     });
     if (dslr != vk::Result::eSuccess)
         return make_error(Error::DeviceCreationFailed, "createDescriptorSetLayout");
@@ -333,11 +335,20 @@ std::expected<void, ErrorInfo> Runner::run_raw(std::span<const std::uint32_t> sp
     auto& output_buffer = *buf_r;
     std::memset(output_buffer->mapped, 0, output.size());
 
+    const auto input_size = std::max<std::size_t>(64, push_constants.size());
+    auto input_r = create_host_buffer(device_, physical_device_, input_size,
+                                      vk::BufferUsageFlagBits::eStorageBuffer);
+    if (!input_r)
+        return std::unexpected(input_r.error());
+    auto& input_buffer = *input_r;
+    std::memset(input_buffer->mapped, 0, input_size);
+    if (!push_constants.empty())
+        std::memcpy(input_buffer->mapped, push_constants.data(), push_constants.size());
+
     // Per-call: shader object --------------------------------------------
     vk::PushConstantRange shader_pc{
         .stageFlags = vk::ShaderStageFlagBits::eCompute,
         .offset = 0,
-        // .size = static_cast<std::uint32_t>(push_constants.size()),
         .size = sizeof(Shader::PushData),
     };
     vk::ShaderCreateInfoEXT sci{
@@ -348,8 +359,8 @@ std::expected<void, ErrorInfo> Runner::run_raw(std::span<const std::uint32_t> sp
         .pName = "main",
         .setLayoutCount = 1,
         .pSetLayouts = &descriptor_set_layout_,
-        .pushConstantRangeCount = push_constants.empty() ? 0u : 1u,
-        .pPushConstantRanges = push_constants.empty() ? nullptr : &shader_pc,
+        .pushConstantRangeCount = 1,
+        .pPushConstantRanges = &shader_pc,
     };
     auto [sr, shaders] = device_.createShadersEXT(sci);
     if (sr != vk::Result::eSuccess)
@@ -378,38 +389,38 @@ std::expected<void, ErrorInfo> Runner::run_raw(std::span<const std::uint32_t> sp
     vk::ShaderStageFlagBits stage = vk::ShaderStageFlagBits::eCompute;
     command_buffer_.bindShadersEXT(1, &stage, &shader);
 
-    // Push descriptor: binding 0 = output SSBO ---------------------------
-    vk::DescriptorBufferInfo dbi{
-        .buffer = output_buffer->buffer,
-        .offset = 0,
-        .range = VK_WHOLE_SIZE,
-    };
-    vk::WriteDescriptorSet write{
-        .dstBinding = 0,
-        .descriptorCount = 1,
-        .descriptorType = vk::DescriptorType::eStorageBuffer,
-        .pBufferInfo = &dbi,
-    };
+    // Output buffer and scalar user data match the recompiler's descriptor bindings.
+    const std::array<vk::DescriptorBufferInfo, 2> buffers{{
+        {.buffer = output_buffer->buffer, .offset = 0, .range = VK_WHOLE_SIZE},
+        {.buffer = input_buffer->buffer, .offset = 0, .range = VK_WHOLE_SIZE},
+    }};
+    std::array<vk::WriteDescriptorSet, 2> writes{};
+    for (std::uint32_t i = 0; i < writes.size(); ++i) {
+        writes[i] = {
+            .dstBinding = i,
+            .descriptorCount = 1,
+            .descriptorType = vk::DescriptorType::eStorageBuffer,
+            .pBufferInfo = &buffers[i],
+        };
+    }
     vk::PushDescriptorSetInfoKHR push_desc{
         .stageFlags = vk::ShaderStageFlagBits::eCompute,
         .layout = pipeline_layout_,
         .set = 0,
-        .descriptorWriteCount = 1,
-        .pDescriptorWrites = &write,
+        .descriptorWriteCount = static_cast<std::uint32_t>(writes.size()),
+        .pDescriptorWrites = writes.data(),
     };
     command_buffer_.pushDescriptorSet2KHR(push_desc);
 
-    // Push constants -----------------------------------------------------
-    if (!push_constants.empty()) {
-        vk::PushConstantsInfoKHR pci{
-            .layout = pipeline_layout_,
-            .stageFlags = vk::ShaderStageFlagBits::eCompute,
-            .offset = 16, // fall onto ud_regs in PushData
-            .size = static_cast<std::uint32_t>(push_constants.size()),
-            .pValues = push_constants.data(),
-        };
-        command_buffer_.pushConstants2KHR(pci);
-    }
+    const Shader::PushData push_data{};
+    vk::PushConstantsInfoKHR pci{
+        .layout = pipeline_layout_,
+        .stageFlags = vk::ShaderStageFlagBits::eCompute,
+        .offset = 0,
+        .size = sizeof(push_data),
+        .pValues = &push_data,
+    };
+    command_buffer_.pushConstants2KHR(pci);
 
     command_buffer_.dispatch(dispatch.x, dispatch.y, dispatch.z);
 
