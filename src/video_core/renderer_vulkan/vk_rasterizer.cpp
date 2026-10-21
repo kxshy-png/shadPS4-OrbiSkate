@@ -137,16 +137,16 @@ bool Rasterizer::TrySkateDepthCopy() {
         regs.depth_htile_data_base.GetAddress(), liverpool->last_db_extent};
     VideoCore::TextureCache::ImageDesc dst_desc{regs.color_buffers[0],
                                                 liverpool->last_cb_extent[0]};
-    if (src_desc.info.size != VideoCore::Extent3D{width, height, 1} ||
-        dst_desc.info.size != src_desc.info.size) {
+    if (width > src_desc.info.size.width || height > src_desc.info.size.height ||
+        width > dst_desc.info.size.width || height > dst_desc.info.size.height) {
         return false;
     }
     const auto src_id = texture_cache.FindImage(src_desc);
     const auto dst_id = texture_cache.FindImage(dst_desc);
     texture_cache.UpdateImage(src_id);
     texture_cache.FindRenderTarget(dst_id, dst_desc);
-    if (!runtime.CopyDepthToColor(&texture_cache.GetImage(src_id),
-                                  &texture_cache.GetImage(dst_id))) {
+    if (!runtime.CopyDepthToColor(&texture_cache.GetImage(src_id), &texture_cache.GetImage(dst_id),
+                                  width, height)) {
         return false;
     }
     texture_cache.TouchMeta(regs.color_buffers[0].CmaskAddress(), 0, false);

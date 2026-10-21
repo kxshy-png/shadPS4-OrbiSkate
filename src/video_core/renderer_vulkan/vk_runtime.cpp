@@ -500,27 +500,29 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
     }
 }
 
-bool Runtime::CopyDepthToColor(VideoCore::Image* src, VideoCore::Image* dst) {
+bool Runtime::CopyDepthToColor(VideoCore::Image* src, VideoCore::Image* dst, u32 width,
+                               u32 height) {
     constexpr auto dst_format = vk::Format::eR32Sfloat;
     if (!src->info.props.is_depth || dst->info.props.is_depth || src->info.num_samples != 2 ||
         dst->info.num_samples != 1 ||
-        !VideoCore::IsVulkanFormatCompatible(dst->info.pixel_format, dst_format) ||
-        src->info.size != dst->info.size || src->info.props.is_volume ||
-        dst->info.props.is_volume || src->info.resources.levels != 1 ||
+        !VideoCore::IsVulkanFormatCompatible(dst->info.pixel_format, dst_format) || width == 0 ||
+        height == 0 || width > src->info.size.width || height > src->info.size.height ||
+        width > dst->info.size.width || height > dst->info.size.height ||
+        src->info.props.is_volume || dst->info.props.is_volume || src->info.resources.levels != 1 ||
         dst->info.resources.levels != 1 || src->info.resources.layers != 1 ||
         dst->info.resources.layers != 1) {
         return false;
     }
     scheduler.EndRendering();
-    SetBackingSamples(dst, 1, false);
+    SetBackingSamples(dst, 1, width != dst->info.size.width || height != dst->info.size.height);
     Transit(src, vk::ImageLayout::eShaderReadOnlyOptimal,
             vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
     Transit(dst, vk::ImageLayout::eColorAttachmentOptimal,
             vk::PipelineStageFlagBits2::eColorAttachmentOutput,
             vk::AccessFlagBits2::eColorAttachmentWrite);
     FlushBarriers();
-    blit_helper->CopyBetweenMsImages(dst->info.size.width, dst->info.size.height, 1, dst_format,
-                                     true, src->GetImage(), dst->GetImage(), src->info.pixel_format,
+    blit_helper->CopyBetweenMsImages(width, height, 1, dst_format, true, src->GetImage(),
+                                     dst->GetImage(), src->info.pixel_format,
                                      vk::ImageAspectFlagBits::eDepth);
     dst->flags |= VideoCore::ImageFlagBits::GpuModified;
     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
