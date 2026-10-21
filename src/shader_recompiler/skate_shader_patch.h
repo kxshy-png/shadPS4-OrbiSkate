@@ -14,6 +14,28 @@
 
 namespace Shader::Gcn {
 
+inline bool IsSkateWorkgroupIndexedShader(std::span<const u32> code, u64 shader_hash) {
+    static constexpr std::array<std::array<u64, 3>, 4> shaders{{
+        {0x90882249, 86108, 0x0a0b49c4f6321ef8},
+        {0x39e20c57, 1768, 0x52ba0f0c5810bd5e},
+        {0x36c342c7, 19408, 0x9e77ee8a8269cf75},
+        {0x74b1b049, 5320, 0x735db4bc6347ee03},
+    }};
+    const auto shader = std::ranges::find_if(shaders, [&](const auto& entry) {
+        return entry[0] == shader_hash && entry[1] == code.size_bytes();
+    });
+    if (shader == shaders.end()) {
+        return false;
+    }
+    u64 fingerprint = 0xcbf29ce484222325;
+    for (const u32 word : code) {
+        for (u32 shift = 0; shift < 32; shift += 8) {
+            fingerprint = (fingerprint ^ ((word >> shift) & 0xff)) * 0x100000001b3;
+        }
+    }
+    return fingerprint == (*shader)[2];
+}
+
 inline std::vector<u32> LowerSkateJumpTable(std::span<const u32> code, u32 branch_pc,
                                             u32 table_offset, std::span<const u32> targets) {
     if (targets.empty() || targets.size() > 65 || code.size() > 0x100000) {

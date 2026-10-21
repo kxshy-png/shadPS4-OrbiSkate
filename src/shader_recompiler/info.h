@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <span>
 #include <vector>
 #include <boost/container/static_vector.hpp>
@@ -103,6 +104,7 @@ struct Info : InfoPersistent {
     std::span<const u32> user_data;
     std::vector<u32> flattened_ud_buf;
     PersistentSrtInfo srt_info;
+    std::array<u32, 3> srt_workgroup_id{};
 
     AttributeFlags loads{};
     AttributeFlags stores{};
@@ -168,6 +170,10 @@ struct Info : InfoPersistent {
         flattened_ud_buf.resize(srt_info.flattened_bufsize_dw);
         ASSERT(user_data.size() <= NUM_USER_DATA_REGS);
         std::memcpy(flattened_ud_buf.data(), user_data.data(), user_data.size_bytes());
+        if (srt_info.workgroup_id_offset_dw != 0) {
+            std::memcpy(flattened_ud_buf.data() + srt_info.workgroup_id_offset_dw,
+                        srt_workgroup_id.data(), sizeof(srt_workgroup_id));
+        }
         if (srt_info.walker_func) {
             srt_info.walker_func(user_data.data(), flattened_ud_buf.data());
         }
