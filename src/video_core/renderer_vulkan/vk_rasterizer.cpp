@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "common/debug.h"
+#include "common/elf_info.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -500,7 +501,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
         BindBuffers(*stage, binding, push_data);
-        BindTextures(*stage, binding);
+        if (!BindTextures(*stage, binding)) {
+            ResetBindings(pipeline->IsCompute());
+            return false;
+        }
         uses_dma |= stage->uses_dma;
     }
 
@@ -654,6 +658,13 @@ void Rasterizer::BindIndexBuffer(u32 index_offset, bool is_indirect) {
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {
+    for (const auto [stencil_id, depth_id] : stencil_storage_aliases) {
+        auto& stencil = texture_cache.GetImage(stencil_id);
+        if (texture_cache.GetAssociatedDepth(stencil) == depth_id) {
+            runtime.CopyStencil(&stencil, &texture_cache.GetImage(depth_id));
+        }
+    }
+    stencil_storage_aliases.clear();
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
@@ -926,7 +937,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     }
 }
 
-void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
+bool Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
     const u32 first_image_idx = image_infos.size();
     // To emulate storing to explicit mip levels, build a descriptor array with each mip level.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
@@ -973,10 +984,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
-                // If this image has an associated depth image, it's a stencil attachment.
-                // Redirect the access to the actual depth-stencil buffer.
-                image_id = depth_image_id;
-                image = &texture_cache.GetImage(image_id);
+                if (image_desc.is_written &&
+                    Common::ElfInfo::Instance().GameSerial() == "CUSA37423") {
+                    const auto alias = std::pair{image_id, depth_image_id};
+                    if (std::ranges::find(stencil_storage_aliases, alias) ==
+                        stencil_storage_aliases.end()) {
+                        texture_cache.UpdateImage(depth_image_id);
+                        texture_cache.UpdateImage(image_id);
+                        if (!runtime.CopyStencil(&texture_cache.GetImage(depth_image_id), image)) {
+                            return false;
+                        }
+                        stencil_storage_aliases.push_back(alias);
+                    }
+                } else {
+                    image_id = depth_image_id;
+                    image = &texture_cache.GetImage(image_id);
+                }
             }
             if (image->binding.is_bound) {
                 // The image is already bound. In case if it is about to be used as storage we
@@ -1087,6 +1110,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         set_write.descriptorType = vk::DescriptorType::eSampler;
         set_write.pImageInfo = &image_infos.back();
     }
+    return true;
 }
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
