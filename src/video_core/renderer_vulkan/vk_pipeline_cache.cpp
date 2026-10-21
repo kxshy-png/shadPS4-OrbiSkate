@@ -3,6 +3,7 @@
 
 #include <ranges>
 
+#include "common/arch.h"
 #include "common/elf_info.h"
 #include "common/hash.h"
 #include "common/io_file.h"
@@ -372,7 +373,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     return it->second.get();
 }
 
-const ComputePipeline* PipelineCache::GetComputePipeline() {
+const ComputePipeline* PipelineCache::GetComputePipeline(std::array<u32, 3> workgroup_id) {
+    srt_workgroup_id = workgroup_id;
     if (!RefreshComputeKey()) {
         return nullptr;
     }
@@ -633,7 +635,17 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
 
     std::vector<u32> skate_code;
+    info.srt_workgroup_id = srt_workgroup_id;
     if (Common::ElfInfo::Instance().GameSerial() == "CUSA37423") {
+#ifdef ARCH_X86_64
+        if (info.hw_stage == HwStage::Compute &&
+            Shader::Gcn::IsSkateWorkgroupIndexedShader(code, info.pgm_hash)) {
+            info.srt_info.workgroup_id_offset_dw = Shader::NUM_USER_DATA_REGS;
+            info.srt_info.flattened_bufsize_dw = Shader::NUM_USER_DATA_REGS + 3;
+            LOG_WARNING(Render_Recompiler, "Resolving skate. resources per workgroup for {:#x}",
+                        info.pgm_hash);
+        }
+#endif
         skate_code = Shader::Gcn::PatchSkateJumpTable(code, info.pgm_hash);
         if (skate_code.empty()) {
             skate_code = Shader::Gcn::PatchSkateRuntimeJumpTable(
@@ -717,6 +729,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
+    info.srt_workgroup_id = srt_workgroup_id;
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <limits>
+
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -328,6 +330,10 @@ void Rasterizer::DispatchDirect() {
     }
 
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    if (cs.srt_info.workgroup_id_offset_dw != 0) {
+        DispatchWorkgroups({cs_program.dim_x, cs_program.dim_y, cs_program.dim_z});
+        return;
+    }
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
         return;
     }
@@ -362,6 +368,27 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         return;
     }
 
+    if (pipeline->GetStage(Shader::SwStage::Compute).srt_info.workgroup_id_offset_dw != 0) {
+        if (offset > std::numeric_limits<VAddr>::max() - address) {
+            return;
+        }
+        const VAddr args_address = address + offset;
+        std::array<u32, 3> counts{};
+        if (memory->ClampRangeSize(args_address, sizeof(counts)) != sizeof(counts)) {
+            LOG_ERROR(Render_Vulkan, "Invalid skate. indirect argument range at {:#x}",
+                      args_address);
+            return;
+        }
+        buffer_cache.ReadMemory(args_address, sizeof(counts), false, false, true);
+        if (!memory->ReadMappedBytes(args_address,
+                                     {reinterpret_cast<u8*>(counts.data()), sizeof(counts)})) {
+            LOG_ERROR(Render_Vulkan, "Cannot read skate. workgroup counts at {:#x}", args_address);
+            return;
+        }
+        DispatchWorkgroups(counts);
+        return;
+    }
+
     if (!BindResources(pipeline)) {
         return;
     }
@@ -383,6 +410,46 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     DebugState.IncDispatch();
 
     ResetBindings(true);
+}
+
+void Rasterizer::DispatchWorkgroups(std::array<u32, 3> counts) {
+    if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Disabled) {
+        LOG_ERROR(Render_Vulkan, "skate. workgroup resource lookup requires GPU readbacks");
+        return;
+    }
+    const auto limits = instance.GetPhysicalDevice().getProperties().limits;
+    u64 total = 1;
+    for (size_t i = 0; i < counts.size(); ++i) {
+        if (counts[i] == 0) {
+            return;
+        }
+        if (counts[i] > limits.maxComputeWorkGroupCount[i] || total > 65536 / counts[i]) {
+            LOG_ERROR(Render_Vulkan, "Unsupported skate. split dispatch size: {}x{}x{}", counts[0],
+                      counts[1], counts[2]);
+            return;
+        }
+        total *= counts[i];
+    }
+    for (u32 z = 0; z < counts[2]; ++z) {
+        for (u32 y = 0; y < counts[1]; ++y) {
+            for (u32 x = 0; x < counts[0]; ++x) {
+                const auto* pipeline = pipeline_cache.GetComputePipeline({x, y, z});
+                if (!pipeline || !BindResources(pipeline)) {
+                    return;
+                }
+                if (needs_barrier) {
+                    runtime.FlushBarriers();
+                }
+                scheduler.EndRendering();
+                pipeline->BindResources(set_writes, push_data);
+                const auto cmdbuf = scheduler.CommandBuffer();
+                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+                cmdbuf.dispatchBase(x, y, z, 1, 1, 1);
+                DebugState.IncDispatch();
+                ResetBindings(true);
+            }
+        }
+    }
 }
 
 u64 Rasterizer::Flush() {
@@ -408,8 +475,11 @@ void Rasterizer::OnFence() {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
-    if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
-        IsComputeImageClear(pipeline)) {
+    const bool workgroup_resources =
+        pipeline->IsCompute() &&
+        pipeline->GetStage(Shader::SwStage::Compute).srt_info.workgroup_id_offset_dw != 0;
+    if (!workgroup_resources && (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
+                                 IsComputeImageClear(pipeline))) {
         return false;
     }
 

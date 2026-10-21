@@ -103,6 +103,8 @@ public:
 #endif
 
 private:
+    void DispatchWorkgroups(std::array<u32, 3> counts);
+
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
