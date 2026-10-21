@@ -113,7 +113,7 @@ bool Rasterizer::FilterDraw() {
 bool Rasterizer::TrySkateDepthCopy() {
     const auto& regs = liverpool->regs;
     if (Common::ElfInfo::Instance().GameSerial() != "CUSA37423" ||
-        !regs.depth_render_control.depth_copy ||
+        !regs.depth_render_control.depth_copy || regs.ps_program.address == 0 ||
         !IsSkateDepthCopyDraw(regs, AmdGpu::GetParams(regs.ps_program).hash)) {
         return false;
     }
