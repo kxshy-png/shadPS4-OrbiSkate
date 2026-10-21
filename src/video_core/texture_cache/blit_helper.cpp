@@ -149,15 +149,16 @@ void BlitHelper::ReinterpretColorAsMsDepth(u32 width, u32 height, u32 num_sample
 
 void BlitHelper::CopyBetweenMsImages(u32 width, u32 height, u32 num_samples,
                                      vk::Format pixel_format, bool src_msaa, vk::Image source,
-                                     vk::Image dest) {
+                                     vk::Image dest, vk::Format src_pixel_format,
+                                     vk::ImageAspectFlags src_aspect) {
     const vk::ImageViewUsageCreateInfo src_usage_ci{.usage = vk::ImageUsageFlagBits::eSampled};
     const vk::ImageViewCreateInfo src_view_ci = {
         .pNext = &src_usage_ci,
         .image = source,
         .viewType = vk::ImageViewType::e2D,
-        .format = pixel_format,
+        .format = src_pixel_format == vk::Format::eUndefined ? pixel_format : src_pixel_format,
         .subresourceRange{
-            .aspectMask = vk::ImageAspectFlagBits::eColor,
+            .aspectMask = src_aspect,
             .baseMipLevel = 0U,
             .levelCount = 1U,
             .baseArrayLayer = 0U,
