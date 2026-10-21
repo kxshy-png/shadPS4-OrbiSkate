@@ -11,6 +11,7 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include <algorithm>
+#include <array>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -39,7 +40,7 @@ struct IrqController {
     u64 RegisterOnce(InterruptId irq, IrqHandler handler) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = irq_contexts[static_cast<u32>(irq)];
         std::unique_lock lock{ctx.m_lock};
         const u64 request_id = ++ctx.last_request_id;
         ASSERT_MSG(request_id != 0, "IRQ request identifier exhausted");
@@ -50,7 +51,7 @@ struct IrqController {
     void Register(InterruptId irq, IrqHandler handler, void* uid) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = irq_contexts[static_cast<u32>(irq)];
 
         std::unique_lock lock{ctx.m_lock};
         ASSERT_MSG(ctx.persistent_handlers.find(uid) == ctx.persistent_handlers.cend(),
@@ -61,7 +62,7 @@ struct IrqController {
     void Unregister(InterruptId irq, void* uid) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = irq_contexts[static_cast<u32>(irq)];
         std::unique_lock lock{ctx.m_lock};
         ctx.persistent_handlers.erase(uid);
     }
@@ -69,7 +70,7 @@ struct IrqController {
     void Signal(InterruptId irq, u64 request_id = 0) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Unexpected IRQ signaled");
-        auto& ctx = irq_contexts.try_emplace(irq).first->second;
+        auto& ctx = irq_contexts[static_cast<u32>(irq)];
         std::unique_lock lock{ctx.m_lock};
 
         const auto handler = request_id == 0
@@ -99,7 +100,7 @@ private:
         u64 last_request_id{};
         std::mutex m_lock{};
     };
-    std::unordered_map<InterruptId, IrqContext> irq_contexts{};
+    std::array<IrqContext, static_cast<u32>(InterruptId::InterruptIdMax) + 1> irq_contexts{};
 };
 
 using IrqC = Common::Singleton<IrqController>;
