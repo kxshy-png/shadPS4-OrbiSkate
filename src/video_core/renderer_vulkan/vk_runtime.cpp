@@ -501,8 +501,10 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
 }
 
 bool Runtime::CopyDepthToColor(VideoCore::Image* src, VideoCore::Image* dst) {
+    constexpr auto dst_format = vk::Format::eR32Sfloat;
     if (!src->info.props.is_depth || dst->info.props.is_depth || src->info.num_samples != 2 ||
-        dst->info.num_samples != 1 || dst->info.pixel_format != vk::Format::eR32Sfloat ||
+        dst->info.num_samples != 1 ||
+        !VideoCore::IsVulkanFormatCompatible(dst->info.pixel_format, dst_format) ||
         src->info.size != dst->info.size || src->info.props.is_volume ||
         dst->info.props.is_volume || src->info.resources.levels != 1 ||
         dst->info.resources.levels != 1 || src->info.resources.layers != 1 ||
@@ -517,9 +519,9 @@ bool Runtime::CopyDepthToColor(VideoCore::Image* src, VideoCore::Image* dst) {
             vk::PipelineStageFlagBits2::eColorAttachmentOutput,
             vk::AccessFlagBits2::eColorAttachmentWrite);
     FlushBarriers();
-    blit_helper->CopyBetweenMsImages(dst->info.size.width, dst->info.size.height, 1,
-                                     dst->info.pixel_format, true, src->GetImage(), dst->GetImage(),
-                                     src->info.pixel_format, vk::ImageAspectFlagBits::eDepth);
+    blit_helper->CopyBetweenMsImages(dst->info.size.width, dst->info.size.height, 1, dst_format,
+                                     true, src->GetImage(), dst->GetImage(), src->info.pixel_format,
+                                     vk::ImageAspectFlagBits::eDepth);
     dst->flags |= VideoCore::ImageFlagBits::GpuModified;
     dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
     return true;
