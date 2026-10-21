@@ -169,6 +169,7 @@ set(GCN_TEST_SOURCES
     # Tests
     gcn/test_gcn_instructions.cpp
     gcn/test_skate_jump_table.cpp
+    test_irq_controller.cpp
 )
 
 add_executable(shadps4_settings_test ${SETTINGS_TEST_SOURCES})
