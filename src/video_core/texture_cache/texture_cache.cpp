@@ -249,6 +249,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         // The guest requires a depth sampled texture, but cache can offer only Rxf. Need to
         // recreate the image.
         recreate |= requested_info.props.is_depth && !cache_image.info.props.is_depth;
+        recreate |= cache_image.info.props.is_depth && !requested_info.props.is_depth &&
+                    !Vulkan::LiverpoolToVK::IsFormatDepthCompatible(requested_info.pixel_format);
         break;
     case BindingType::Storage:
         // If the guest is going to use previously created depth as storage, the image needs to be
@@ -285,7 +287,8 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         auto& new_image = slot_images[new_image_id];
         new_image.usage = cache_image.usage;
         if (new_info.num_samples == 1 &&
-            (new_info.resources.layers > cache_image.info.resources.layers ||
+            (new_info.size != cache_image.info.size ||
+             new_info.resources.layers > cache_image.info.resources.layers ||
              new_info.resources.levels > cache_image.info.resources.levels)) {
             RefreshImage(new_image);
         }
