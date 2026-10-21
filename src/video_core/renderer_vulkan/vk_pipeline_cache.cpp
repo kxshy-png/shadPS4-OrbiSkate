@@ -3,15 +3,20 @@
 
 #include <ranges>
 
+#include "common/arch.h"
+#include "common/elf_info.h"
 #include "common/hash.h"
 #include "common/io_file.h"
 #include "common/path_util.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
+#include "core/memory.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/info.h"
 #include "shader_recompiler/recompiler.h"
 #include "shader_recompiler/runtime_info.h"
+#include "shader_recompiler/skate_shader_patch.h"
+#include "shader_recompiler/skate_spirv_patch.h"
 #include "video_core/amdgpu/liverpool.h"
 #include "video_core/cache_storage.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
@@ -368,7 +373,8 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline(const DrawIndirectPar
     return it->second.get();
 }
 
-const ComputePipeline* PipelineCache::GetComputePipeline() {
+const ComputePipeline* PipelineCache::GetComputePipeline(std::array<u32, 3> workgroup_id) {
+    srt_workgroup_id = workgroup_id;
     if (!RefreshComputeKey()) {
         return nullptr;
     }
@@ -628,8 +634,52 @@ vk::ShaderModule PipelineCache::CompileModule(Shader::Info& info, Shader::Runtim
              perm_idx != 0 ? "(permutation)" : "");
     DumpShader(code, info.pgm_hash, info.hw_stage, perm_idx, "bin");
 
-    const auto ir_program = Shader::TranslateProgram(code, pools, info, runtime_info, profile);
+    std::vector<u32> skate_code;
+    info.srt_workgroup_id = srt_workgroup_id;
+    if (Common::ElfInfo::Instance().GameSerial() == "CUSA37423") {
+#ifdef ARCH_X86_64
+        if (info.hw_stage == HwStage::Compute &&
+            Shader::Gcn::IsSkateWorkgroupIndexedShader(code, info.pgm_hash)) {
+            info.srt_info.workgroup_id_offset_dw = Shader::NUM_USER_DATA_REGS;
+            info.srt_info.flattened_bufsize_dw = Shader::NUM_USER_DATA_REGS + 3;
+            LOG_WARNING(Render_Recompiler, "Resolving skate. resources per workgroup for {:#x}",
+                        info.pgm_hash);
+        }
+#endif
+        skate_code = Shader::Gcn::PatchSkateJumpTable(code, info.pgm_hash);
+        if (skate_code.empty()) {
+            skate_code = Shader::Gcn::PatchSkateRuntimeJumpTable(
+                code, [&](u32 offset, std::span<u32> destination) {
+                    const auto address = reinterpret_cast<uintptr_t>(code.data());
+                    return Core::Memory::Instance()->ReadMappedBytes(
+                        address + offset,
+                        {reinterpret_cast<u8*>(destination.data()), destination.size_bytes()});
+                });
+        }
+        if (!skate_code.empty()) {
+            LOG_WARNING(Render_Recompiler, "Applied skate. jump-table workaround to {:#x}",
+                        info.pgm_hash);
+        }
+    }
+    const std::span<const u32> translated_code = skate_code.empty() ? code : skate_code;
+    const auto ir_program =
+        Shader::TranslateProgram(translated_code, pools, info, runtime_info, profile);
     auto spv = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, ir_program, binding);
+    if (Common::ElfInfo::Instance().GameSerial() == "CUSA37423" && profile.subgroup_size == 32 &&
+        !instance.IsSubgroupSize64Supported() && info.hw_stage == HwStage::Fragment &&
+        info.pgm_hash == 0x893aad98 && code.size_bytes() == 8860) {
+        u64 fingerprint = 0xcbf29ce484222325;
+        for (const u32 word : code) {
+            for (u32 shift = 0; shift < 32; shift += 8) {
+                fingerprint = (fingerprint ^ ((word >> shift) & 0xff)) * 0x100000001b3;
+            }
+        }
+        if (fingerprint == 0x432dbec654433b76 && Shader::BoundSkateFragmentLoops(spv)) {
+            LOG_WARNING(Render_Recompiler,
+                        "Applied skate. fragment loop limit (64 iterations) to {:#x}",
+                        info.pgm_hash);
+        }
+    }
     DumpShader(spv, info.pgm_hash, info.hw_stage, perm_idx, "spv");
 
     vk::ShaderModule module;
@@ -679,6 +729,7 @@ PipelineCache::Result PipelineCache::GetProgram(HwStage hw_stage, SwStage sw_sta
     auto& info = program->info;
     info.pgm_base = params.Base(); // Needs to be actualized for inline cbuffer address fixup
     info.user_data = params.user_data;
+    info.srt_workgroup_id = srt_workgroup_id;
     info.RefreshFlatBuf();
     auto spec = Shader::StageSpecialization(info, runtime_info, profile, binding);
 

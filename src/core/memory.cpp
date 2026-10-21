@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/debug.h"
@@ -1017,6 +1018,22 @@ s32 MemoryManager::UnmapMemoryImpl(VAddr virtual_addr, u64 size) {
     } while (unmapped_bytes < size);
 
     return ORBIS_OK;
+}
+
+bool MemoryManager::ReadMappedBytes(VAddr addr, std::span<u8> destination) {
+    std::shared_lock lk{mutex};
+    auto it = vma_map.upper_bound(addr);
+    if (it == vma_map.begin()) {
+        return false;
+    }
+    const auto& vma = std::prev(it)->second;
+    if (!vma.IsMapped() || addr - vma.base >= vma.size ||
+        destination.size() > vma.size - (addr - vma.base) ||
+        False(vma.prot & (MemoryProt::CpuReadWrite | MemoryProt::GpuReadWrite))) {
+        return false;
+    }
+    std::memcpy(destination.data(), reinterpret_cast<const void*>(addr), destination.size());
+    return true;
 }
 
 s32 MemoryManager::QueryProtection(VAddr addr, void** start, void** end, u32* prot) {

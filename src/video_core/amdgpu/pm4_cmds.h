@@ -238,10 +238,11 @@ struct PM4CmdNop {
         SetTsharpInUdata = 0x68750005u,     ///< Indicates that T# will be set in the next packet
         SetSsharpInUdata = 0x68750006u,     ///< Indicates that S# will be set in the next packet
         DebugColorMarkerPush = 0x6875000eu, ///< Begin of GPU event scope with color
-        PatchedFlip = 0x68750776u,          ///< Patched flip marker
-        PrepareFlip = 0x68750777u,          ///< Flip marker
-        PrepareFlipLabel = 0x68750778u,     ///< Flip marker with label address
-        PrepareFlipInterrupt = 0x68750780u, ///< Flip marker with interrupt
+        PatchedFlipWithRequest = 0x68750775u,
+        PatchedFlip = 0x68750776u,               ///< Patched flip marker
+        PrepareFlip = 0x68750777u,               ///< Flip marker
+        PrepareFlipLabel = 0x68750778u,          ///< Flip marker with label address
+        PrepareFlipInterrupt = 0x68750780u,      ///< Flip marker with interrupt
         PrepareFlipInterruptLabel = 0x68750781u, ///< Flip marker with interrupt and label
     };
 };

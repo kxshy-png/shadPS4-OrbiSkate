@@ -5,6 +5,7 @@
 
 #include <map>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include "common/enum.h"
@@ -278,6 +279,8 @@ public:
     s32 UnmapMemory(VAddr virtual_addr, u64 size);
 
     s32 QueryProtection(VAddr addr, void** start, void** end, u32* prot);
+
+    bool ReadMappedBytes(VAddr addr, std::span<u8> destination);
 
     s32 Protect(VAddr addr, u64 size, MemoryProt prot);
 

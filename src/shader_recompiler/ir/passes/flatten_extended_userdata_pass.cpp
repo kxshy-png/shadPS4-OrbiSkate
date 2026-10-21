@@ -123,6 +123,8 @@ static bool SrtWalkerSignalHandler(void* context, void* fault_address) {
 using namespace Shader;
 
 struct PassInfo {
+    u32 workgroup_id_offset_dw{};
+
     struct PointerListCompare {
         bool operator()(const IR::Value& a, const IR::Value& b) const {
             // Keep order with the following criteria:
@@ -513,6 +515,14 @@ static bool ComputeOffset(Xbyak::CodeGenerator& c, Xbyak::Reg32 reg, PassInfo& p
     ASSERT(reg != ecx && reg != edx);
     auto inst = off_dw.Inst();
     switch (inst->GetOpcode()) {
+    case IR::Opcode::GetAttributeU32:
+        if (pass_info.workgroup_id_offset_dw != 0 &&
+            inst->Arg(0).Attribute() == IR::Attribute::WorkgroupId && inst->Arg(1).IsImmediate() &&
+            inst->Arg(1).U32() < 3) {
+            c.mov(reg, ptr[rsi + ((pass_info.workgroup_id_offset_dw + inst->Arg(1).U32()) << 2)]);
+            return true;
+        }
+        return false;
     case IR::Opcode::GetUserData:
         c.mov(reg, ptr[rsi + (static_cast<u32>(inst->Arg(0).ScalarReg()) << 2)]);
         return true;
@@ -650,8 +660,9 @@ static void GenerateSrtProgram(Info& info, PassInfo& pass_info) {
     }
 
     info.srt_info.walker_func = c.getCurr<PFN_SrtWalker>();
-    pass_info.dst_off_dw = NUM_USER_DATA_REGS;
-    ASSERT(pass_info.dst_off_dw == info.srt_info.flattened_bufsize_dw);
+    pass_info.dst_off_dw = info.srt_info.flattened_bufsize_dw;
+    pass_info.workgroup_id_offset_dw = info.srt_info.workgroup_id_offset_dw;
+    ASSERT(pass_info.dst_off_dw >= NUM_USER_DATA_REGS);
 
     for (const auto& [sgpr_base, root] : pass_info.srt_roots) {
         VisitPointer(IR::Value(static_cast<u32>(sgpr_base)), root, pass_info, c);

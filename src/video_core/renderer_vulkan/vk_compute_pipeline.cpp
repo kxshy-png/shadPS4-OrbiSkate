@@ -103,6 +103,9 @@ ComputePipeline::ComputePipeline(const Instance& instance, Scheduler& scheduler,
     SetObjectName(device, *pipeline_layout, "Compute PipelineLayout {}", debug_str);
 
     const vk::ComputePipelineCreateInfo compute_pipeline_ci = {
+        .flags = info->srt_info.workgroup_id_offset_dw != 0
+                     ? vk::PipelineCreateFlagBits::eDispatchBase
+                     : vk::PipelineCreateFlags{},
         .stage = shader_ci,
         .layout = *pipeline_layout,
     };

@@ -103,6 +103,8 @@ public:
 #endif
 
 private:
+    void DispatchWorkgroups(std::array<u32, 3> counts);
+
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
@@ -117,10 +119,11 @@ private:
     void UpdateColorBlendingState(const GraphicsPipeline* pipeline) const;
 
     bool FilterDraw();
+    bool TrySkateDepthCopy();
 
     void BindBuffers(const Shader::Info& stage, Shader::Backend::Bindings& binding,
                      Shader::PushData& push_data);
-    void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
+    bool BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
 
     void BindVertexBuffers(const GraphicsPipeline* pipeline);
@@ -168,6 +171,7 @@ private:
     };
     std::vector<BoundBuffer> bound_buffers;
     std::vector<VideoCore::ImageId> bound_images;
+    std::vector<std::pair<VideoCore::ImageId, VideoCore::ImageId>> stencil_storage_aliases;
 
     u32 set_write_index{};
     Pipeline::DescriptorWrites set_writes;

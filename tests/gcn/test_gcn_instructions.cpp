@@ -756,6 +756,50 @@ TEST_F(GcnTest, subb_u32_scc_wrap) {
     EXPECT_EQ(*result, 1U);
 }
 
+TEST_F(GcnTest, scalar_flbit_signed_values) {
+    auto runner = gcn_test::Runner::instance().value();
+    const std::array<u64, 2> instructions{
+        SOP1(OpcodeSOP1::S_FLBIT_I32, SOperand7::S1, SOperand8::S0).Get(),
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S1).Get(),
+    };
+    const auto spirv = TranslateToSpirv(instructions);
+    const std::array<std::pair<u32, u32>, 10> cases{{
+        {0U, 0xffffffffU},
+        {0xffffffffU, 0xffffffffU},
+        {1U, 31U},
+        {2U, 30U},
+        {0x40000000U, 1U},
+        {0x7fffffffU, 1U},
+        {0x80000000U, 1U},
+        {0xfffffffeU, 31U},
+        {0x80000001U, 1U},
+        {0xc0000000U, 2U},
+    }};
+    for (const auto& [value, expected] : cases) {
+        auto result = runner->run<u32>(spirv, std::array{value, 0U, 0U, 0U});
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(*result, expected) << value;
+    }
+}
+
+TEST_F(GcnTest, scalar_flbit_preserves_scc) {
+    auto runner = gcn_test::Runner::instance().value();
+    const std::array<u64, 4> instructions{
+        SOP2(OpcodeSOP2::S_ADD_U32, SOperand7::S3, SOperand8::S0, SOperand8::S1).Get(),
+        SOP1(OpcodeSOP1::S_FLBIT_I32, SOperand7::S0, SOperand8::S2).Get(),
+        SOP2(OpcodeSOP2::S_CSELECT_B32, SOperand7::S0, SOperand8::Const1, SOperand8::Const0).Get(),
+        VOP1(OpcodeVOP1::V_MOV_B32, VOperand8::V0, SOperand9::S0).Get(),
+    };
+    const auto spirv = TranslateToSpirv(instructions);
+    for (const u32 value : {0U, 0xffffffffU, 1U, 0x80000000U}) {
+        for (const u32 carry : {0U, 1U}) {
+            auto result = runner->run<u32>(spirv, std::array{0xffffffffU, carry, value, 0U});
+            ASSERT_TRUE(result.has_value());
+            EXPECT_EQ(*result, carry);
+        }
+    }
+}
+
 TEST_F(GcnTest, addc_u32_clears_scc) {
     auto runner = gcn_test::Runner::instance().value();
     const std::array<u64, 4> instructions{

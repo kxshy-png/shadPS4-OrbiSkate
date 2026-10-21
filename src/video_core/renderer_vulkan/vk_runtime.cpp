@@ -235,10 +235,13 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
                   vk::to_string(src->info.pixel_format), vk::to_string(dst->info.pixel_format));
     }
 
-    const u32 base_width = src->info.size.width;
-    const u32 base_height = src->info.size.height;
+    const u32 base_width = std::min(src->info.size.width, dst->info.size.width);
+    const u32 base_height = std::min(src->info.size.height, dst->info.size.height);
+    const bool src_volume = src->info.type == AmdGpu::ImageType::Color3D;
+    const bool dst_volume = dst->info.type == AmdGpu::ImageType::Color3D;
     const u32 base_depth =
-        dst->info.type == AmdGpu::ImageType::Color3D ? dst->info.size.depth : src->info.size.depth;
+        std::min(src_volume ? src->info.size.depth : u32(src->info.resources.layers),
+                 dst_volume ? dst->info.size.depth : u32(dst->info.resources.layers));
 
     // Match sample count before copying
     SetBackingSamples(dst, dst->info.num_samples, false);
@@ -323,38 +326,52 @@ void Runtime::CopyImage(VideoCore::Image* src, VideoCore::Image* dst) {
 }
 
 void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
-                                  const VideoCore::Buffer* buffer, u64 offset) {
+                                  const VideoCore::Buffer* buffer, u64 offset,
+                                  vk::ImageAspectFlags src_aspect,
+                                  vk::ImageAspectFlags dst_aspect) {
     const u32 num_mips = std::min(src->info.resources.levels, dst->info.resources.levels);
     const u32 num_layers = std::min(src->info.resources.layers, dst->info.resources.layers);
 
     SetBackingSamples(dst, dst->info.num_samples, false);
     SetBackingSamples(src, src->info.num_samples);
 
+    if (!src_aspect) {
+        src_aspect = src->aspect_mask & ~vk::ImageAspectFlagBits::eStencil;
+    }
+    if (!dst_aspect) {
+        dst_aspect = dst->aspect_mask & ~vk::ImageAspectFlagBits::eStencil;
+    }
+    const auto copy_format = src_aspect == vk::ImageAspectFlagBits::eStencil
+                                 ? vk::Format::eS8Uint
+                                 : src->info.pixel_format;
+    const vk::Extent3D extent{std::min(src->info.size.width, dst->info.size.width),
+                              std::min(src->info.size.height, dst->info.size.height),
+                              std::min(src->info.size.depth, dst->info.size.depth)};
+
     vk::BufferImageCopy buffer_copy = {
         .bufferOffset = offset,
         .bufferRowLength = 0,
         .bufferImageHeight = 0,
         .imageSubresource{
-            .aspectMask = src->aspect_mask & ~vk::ImageAspectFlagBits::eStencil,
+            .aspectMask = src_aspect,
             .mipLevel = 0u,
             .baseArrayLayer = 0,
             .layerCount = num_layers,
         },
         .imageOffset = {0, 0, 0},
-        .imageExtent = {src->info.size.width, src->info.size.height, src->info.size.depth},
+        .imageExtent = extent,
     };
-    u64 copy_size = BufferImageCopySize(buffer_copy, src->info.pixel_format);
+    u64 copy_size = BufferImageCopySize(buffer_copy, copy_format);
     SmallVector<vk::BufferImageCopy, 8> buffer_copies;
     buffer_copies.push_back(buffer_copy);
     for (u32 mip = 1; mip < num_mips; ++mip) {
         auto mip_copy = buffer_copy;
         mip_copy.bufferOffset = Common::AlignUp(offset + copy_size, 16);
         mip_copy.imageSubresource.mipLevel = mip;
-        mip_copy.imageExtent = vk::Extent3D{std::max(src->info.size.width >> mip, 1u),
-                                            std::max(src->info.size.height >> mip, 1u),
-                                            std::max(src->info.size.depth >> mip, 1u)};
-        copy_size =
-            mip_copy.bufferOffset - offset + BufferImageCopySize(mip_copy, src->info.pixel_format);
+        mip_copy.imageExtent =
+            vk::Extent3D{std::max(extent.width >> mip, 1u), std::max(extent.height >> mip, 1u),
+                         std::max(extent.depth >> mip, 1u)};
+        copy_size = mip_copy.bufferOffset - offset + BufferImageCopySize(mip_copy, copy_format);
         buffer_copies.push_back(mip_copy);
     }
 
@@ -387,7 +404,7 @@ void Runtime::CopyImageWithBuffer(VideoCore::Image* src, VideoCore::Image* dst,
     });
 
     for (auto& copy : buffer_copies) {
-        copy.imageSubresource.aspectMask = dst->aspect_mask & ~vk::ImageAspectFlagBits::eStencil;
+        copy.imageSubresource.aspectMask = dst_aspect;
     }
     cmdbuf.copyBufferToImage(buffer->Handle(), dst->GetImage(),
                              vk::ImageLayout::eTransferDstOptimal, buffer_copies);
@@ -481,6 +498,60 @@ void Runtime::CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst) {
     } else {
         LOG_WARNING(Render_Vulkan, "Unimplemented depth overlap copy");
     }
+}
+
+bool Runtime::CopyDepthToColor(VideoCore::Image* src, VideoCore::Image* dst, u32 width,
+                               u32 height) {
+    constexpr auto dst_format = vk::Format::eR32Sfloat;
+    if (!src->info.props.is_depth || dst->info.props.is_depth || src->info.num_samples != 2 ||
+        dst->info.num_samples != 1 ||
+        !VideoCore::IsVulkanFormatCompatible(dst->info.pixel_format, dst_format) || width == 0 ||
+        height == 0 || width > src->info.size.width || height > src->info.size.height ||
+        width > dst->info.size.width || height > dst->info.size.height ||
+        src->info.props.is_volume || dst->info.props.is_volume || src->info.resources.levels != 1 ||
+        dst->info.resources.levels != 1 || src->info.resources.layers != 1 ||
+        dst->info.resources.layers != 1) {
+        return false;
+    }
+    scheduler.EndRendering();
+    SetBackingSamples(dst, 1, width != dst->info.size.width || height != dst->info.size.height);
+    Transit(src, vk::ImageLayout::eShaderReadOnlyOptimal,
+            vk::PipelineStageFlagBits2::eFragmentShader, vk::AccessFlagBits2::eShaderRead);
+    Transit(dst, vk::ImageLayout::eColorAttachmentOptimal,
+            vk::PipelineStageFlagBits2::eColorAttachmentOutput,
+            vk::AccessFlagBits2::eColorAttachmentWrite);
+    FlushBarriers();
+    blit_helper->CopyBetweenMsImages(width, height, 1, dst_format, true, src->GetImage(),
+                                     dst->GetImage(), src->info.pixel_format,
+                                     vk::ImageAspectFlagBits::eDepth);
+    dst->flags |= VideoCore::ImageFlagBits::GpuModified;
+    dst->flags &= ~VideoCore::ImageFlagBits::Dirty;
+    return true;
+}
+
+bool Runtime::CopyStencil(VideoCore::Image* src, VideoCore::Image* dst) {
+    const auto* depth = src->info.props.is_depth ? src : dst;
+    const auto* color = src->info.props.is_depth ? dst : src;
+    if (!depth->info.props.has_stencil || color->info.props.is_depth || color->info.num_bits != 8 ||
+        src->info.num_samples != 1 || dst->info.num_samples != 1 || src->info.props.is_volume ||
+        dst->info.props.is_volume || src->info.resources.levels != 1 ||
+        dst->info.resources.levels != 1) {
+        LOG_ERROR(Render_Vulkan, "Unsupported stencil storage alias");
+        return false;
+    }
+    const u64 bytes = u64(std::min(src->info.size.width, dst->info.size.width)) *
+                      std::min(src->info.size.height, dst->info.size.height) *
+                      std::min(src->info.resources.layers, dst->info.resources.layers);
+    if (bytes == 0 || bytes > 128_MB) {
+        LOG_ERROR(Render_Vulkan, "Unsupported stencil storage copy size: {}", bytes);
+        return false;
+    }
+    const auto copy = staging_pool.Request(bytes, VideoCore::MemoryType::DeviceLocal);
+    CopyImageWithBuffer(
+        src, dst, copy.buffer, copy.offset,
+        src == depth ? vk::ImageAspectFlagBits::eStencil : vk::ImageAspectFlagBits::eColor,
+        dst == depth ? vk::ImageAspectFlagBits::eStencil : vk::ImageAspectFlagBits::eColor);
+    return true;
 }
 
 void Runtime::CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,

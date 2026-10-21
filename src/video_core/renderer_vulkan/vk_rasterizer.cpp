@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <limits>
+
 #include "common/debug.h"
+#include "common/elf_info.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -11,6 +14,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/skate_depth_copy.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -57,6 +61,9 @@ Rasterizer::~Rasterizer() = default;
 
 bool Rasterizer::FilterDraw() {
     const auto& regs = liverpool->regs;
+    if (TrySkateDepthCopy()) {
+        return false;
+    }
     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::EliminateFastClear) {
         // Clears the render target if FCE is launched before any draws
         EliminateFastClear();
@@ -100,6 +107,53 @@ bool Rasterizer::FilterDraw() {
         return false;
     }
 
+    return true;
+}
+
+bool Rasterizer::TrySkateDepthCopy() {
+    const auto& regs = liverpool->regs;
+    if (Common::ElfInfo::Instance().GameSerial() != "CUSA37423" ||
+        !regs.depth_render_control.depth_copy || regs.ps_program.address == 0 ||
+        !IsSkateDepthCopyDraw(regs, AmdGpu::GetParams(regs.ps_program).hash)) {
+        return false;
+    }
+    const auto width = regs.screen_scissor.GetWidth();
+    const auto height = regs.screen_scissor.GetHeight();
+    const auto& viewport = regs.viewports[0];
+    const auto covers_target = [width, height](const AmdGpu::ViewportScissor& scissor) {
+        return scissor.window_offset_disable && scissor.top_left_x == 0 &&
+               scissor.top_left_y == 0 && scissor.bottom_right_x >= width &&
+               scissor.bottom_right_y >= height;
+    };
+    if (width == 0 || height == 0 || regs.screen_scissor.top_left_x != 0 ||
+        regs.screen_scissor.top_left_y != 0 || !covers_target(regs.window_scissor) ||
+        !covers_target(regs.generic_scissor) || viewport.xscale != float(width) / 2 ||
+        viewport.xoffset != float(width) / 2 || viewport.yscale != -float(height) / 2 ||
+        viewport.yoffset != float(height) / 2) {
+        return false;
+    }
+    VideoCore::TextureCache::ImageDesc src_desc{
+        regs.depth_buffer, regs.depth_view, regs.depth_control,
+        regs.depth_htile_data_base.GetAddress(), liverpool->last_db_extent};
+    VideoCore::TextureCache::ImageDesc dst_desc{regs.color_buffers[0],
+                                                liverpool->last_cb_extent[0]};
+    if (width > src_desc.info.size.width || height > src_desc.info.size.height ||
+        width > dst_desc.info.size.width || height > dst_desc.info.size.height) {
+        return false;
+    }
+    const auto src_id = texture_cache.FindImage(src_desc);
+    const auto dst_id = texture_cache.FindImage(dst_desc);
+    texture_cache.UpdateImage(src_id);
+    texture_cache.FindRenderTarget(dst_id, dst_desc);
+    if (!runtime.CopyDepthToColor(&texture_cache.GetImage(src_id), &texture_cache.GetImage(dst_id),
+                                  width, height)) {
+        return false;
+    }
+    texture_cache.TouchMeta(regs.color_buffers[0].CmaskAddress(), 0, false);
+    static bool reported{};
+    if (!std::exchange(reported, true)) {
+        LOG_WARNING(Render_Vulkan, "Applied skate. DEPTH_COPY to color workaround");
+    }
     return true;
 }
 
@@ -328,6 +382,10 @@ void Rasterizer::DispatchDirect() {
     }
 
     const auto& cs = pipeline->GetStage(Shader::SwStage::Compute);
+    if (cs.srt_info.workgroup_id_offset_dw != 0) {
+        DispatchWorkgroups({cs_program.dim_x, cs_program.dim_y, cs_program.dim_z});
+        return;
+    }
     if (ExecuteShaderHLE(cs, liverpool->regs, cs_program, *this)) {
         return;
     }
@@ -362,6 +420,27 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
         return;
     }
 
+    if (pipeline->GetStage(Shader::SwStage::Compute).srt_info.workgroup_id_offset_dw != 0) {
+        if (offset > std::numeric_limits<VAddr>::max() - address) {
+            return;
+        }
+        const VAddr args_address = address + offset;
+        std::array<u32, 3> counts{};
+        if (memory->ClampRangeSize(args_address, sizeof(counts)) != sizeof(counts)) {
+            LOG_ERROR(Render_Vulkan, "Invalid skate. indirect argument range at {:#x}",
+                      args_address);
+            return;
+        }
+        buffer_cache.ReadMemory(args_address, sizeof(counts), false, false, true);
+        if (!memory->ReadMappedBytes(args_address,
+                                     {reinterpret_cast<u8*>(counts.data()), sizeof(counts)})) {
+            LOG_ERROR(Render_Vulkan, "Cannot read skate. workgroup counts at {:#x}", args_address);
+            return;
+        }
+        DispatchWorkgroups(counts);
+        return;
+    }
+
     if (!BindResources(pipeline)) {
         return;
     }
@@ -383,6 +462,46 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     DebugState.IncDispatch();
 
     ResetBindings(true);
+}
+
+void Rasterizer::DispatchWorkgroups(std::array<u32, 3> counts) {
+    if (EmulatorSettings.GetReadbacksMode() == GpuReadbacksMode::Disabled) {
+        LOG_ERROR(Render_Vulkan, "skate. workgroup resource lookup requires GPU readbacks");
+        return;
+    }
+    const auto limits = instance.GetPhysicalDevice().getProperties().limits;
+    u64 total = 1;
+    for (size_t i = 0; i < counts.size(); ++i) {
+        if (counts[i] == 0) {
+            return;
+        }
+        if (counts[i] > limits.maxComputeWorkGroupCount[i] || total > 65536 / counts[i]) {
+            LOG_ERROR(Render_Vulkan, "Unsupported skate. split dispatch size: {}x{}x{}", counts[0],
+                      counts[1], counts[2]);
+            return;
+        }
+        total *= counts[i];
+    }
+    for (u32 z = 0; z < counts[2]; ++z) {
+        for (u32 y = 0; y < counts[1]; ++y) {
+            for (u32 x = 0; x < counts[0]; ++x) {
+                const auto* pipeline = pipeline_cache.GetComputePipeline({x, y, z});
+                if (!pipeline || !BindResources(pipeline)) {
+                    return;
+                }
+                if (needs_barrier) {
+                    runtime.FlushBarriers();
+                }
+                scheduler.EndRendering();
+                pipeline->BindResources(set_writes, push_data);
+                const auto cmdbuf = scheduler.CommandBuffer();
+                cmdbuf.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline->Handle());
+                cmdbuf.dispatchBase(x, y, z, 1, 1, 1);
+                DebugState.IncDispatch();
+                ResetBindings(true);
+            }
+        }
+    }
 }
 
 u64 Rasterizer::Flush() {
@@ -408,8 +527,11 @@ void Rasterizer::OnFence() {
 }
 
 bool Rasterizer::BindResources(const Pipeline* pipeline) {
-    if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
-        IsComputeImageClear(pipeline)) {
+    const bool workgroup_resources =
+        pipeline->IsCompute() &&
+        pipeline->GetStage(Shader::SwStage::Compute).srt_info.workgroup_id_offset_dw != 0;
+    if (!workgroup_resources && (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
+                                 IsComputeImageClear(pipeline))) {
         return false;
     }
 
@@ -430,7 +552,10 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
         set_writes.resize(set_writes.size() + stage->buffers.size() + stage->images.size() +
                           stage->samplers.size());
         BindBuffers(*stage, binding, push_data);
-        BindTextures(*stage, binding);
+        if (!BindTextures(*stage, binding)) {
+            ResetBindings(pipeline->IsCompute());
+            return false;
+        }
         uses_dma |= stage->uses_dma;
     }
 
@@ -584,6 +709,13 @@ void Rasterizer::BindIndexBuffer(u32 index_offset, bool is_indirect) {
 }
 
 void Rasterizer::ResetBindings(bool is_compute) {
+    for (const auto [stencil_id, depth_id] : stencil_storage_aliases) {
+        auto& stencil = texture_cache.GetImage(stencil_id);
+        if (texture_cache.GetAssociatedDepth(stencil) == depth_id) {
+            runtime.CopyStencil(&stencil, &texture_cache.GetImage(depth_id));
+        }
+    }
+    stencil_storage_aliases.clear();
     for (auto& image_id : bound_images) {
         texture_cache.GetImage(image_id).binding = {};
     }
@@ -856,7 +988,7 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     }
 }
 
-void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
+bool Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
     const u32 first_image_idx = image_infos.size();
     // To emulate storing to explicit mip levels, build a descriptor array with each mip level.
     boost::container::small_vector<u32, 8> image_descriptor_array_sizes;
@@ -903,10 +1035,22 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
-                // If this image has an associated depth image, it's a stencil attachment.
-                // Redirect the access to the actual depth-stencil buffer.
-                image_id = depth_image_id;
-                image = &texture_cache.GetImage(image_id);
+                if (image_desc.is_written &&
+                    Common::ElfInfo::Instance().GameSerial() == "CUSA37423") {
+                    const auto alias = std::pair{image_id, depth_image_id};
+                    if (std::ranges::find(stencil_storage_aliases, alias) ==
+                        stencil_storage_aliases.end()) {
+                        texture_cache.UpdateImage(depth_image_id);
+                        texture_cache.UpdateImage(image_id);
+                        if (!runtime.CopyStencil(&texture_cache.GetImage(depth_image_id), image)) {
+                            return false;
+                        }
+                        stencil_storage_aliases.push_back(alias);
+                    }
+                } else {
+                    image_id = depth_image_id;
+                    image = &texture_cache.GetImage(image_id);
+                }
             }
             if (image->binding.is_bound) {
                 // The image is already bound. In case if it is about to be used as storage we
@@ -976,10 +1120,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
     }
 
     u32 image_info_idx = first_image_idx;
-    u32 image_binding_idx = 0;
-    for (u32 array_size : image_descriptor_array_sizes) {
-        const auto& [_, desc] = image_bindings[image_binding_idx];
-        const bool is_storage = desc.type == VideoCore::TextureCache::BindingType::Storage;
+    for (u32 i = 0; i < stage.images.size(); ++i) {
+        const u32 array_size = image_descriptor_array_sizes[i];
+        const bool is_storage = stage.images[i].is_written;
         auto& set_write = set_writes[set_write_index++];
         set_write.dstSet = VK_NULL_HANDLE;
         set_write.dstBinding = binding.unified;
@@ -990,7 +1133,6 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         set_write.pImageInfo = &image_infos[image_info_idx];
 
         image_info_idx += array_size;
-        image_binding_idx += array_size;
         binding.unified += array_size;
     }
 
@@ -1019,6 +1161,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
         set_write.descriptorType = vk::DescriptorType::eSampler;
         set_write.pImageInfo = &image_infos.back();
     }
+    return true;
 }
 
 RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {

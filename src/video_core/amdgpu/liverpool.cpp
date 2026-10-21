@@ -265,6 +265,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
 
                 switch (nop->data_block[0]) {
+                case PM4CmdNop::PayloadType::PatchedFlipWithRequest: {
+                    ASSERT(nop->header.count.Value() >= 2);
+                    const u64 request_id =
+                        u64{nop->data_block[1]} | (u64{nop->data_block[2]} << 32);
+                    ASSERT(request_id != 0);
+                    Platform::IrqC::Instance()->Signal(Platform::InterruptId::GfxFlip, request_id);
+                    break;
+                }
                 case PM4CmdNop::PayloadType::PatchedFlip: {
                     // There is no evidence that GPU CP drives flip events by parsing
                     // special NOP packets. For convenience lets assume that it does.
