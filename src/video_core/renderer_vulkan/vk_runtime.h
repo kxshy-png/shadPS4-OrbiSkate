@@ -59,6 +59,8 @@ public:
 
     void CopyColorAndDepth(VideoCore::Image* src, VideoCore::Image* dst);
 
+    bool CopyDepthToColor(VideoCore::Image* src, VideoCore::Image* dst);
+
     bool CopyStencil(VideoCore::Image* src, VideoCore::Image* dst);
 
     void CopyDepthStencil(VideoCore::Image* src, VideoCore::Image* dst,

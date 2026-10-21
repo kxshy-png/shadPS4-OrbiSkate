@@ -14,6 +14,7 @@
 #include "video_core/buffer_cache/buffer.h"
 #include "video_core/buffer_cache/buffer_cache.h"
 #include "video_core/renderer_vulkan/liverpool_to_vk.h"
+#include "video_core/renderer_vulkan/skate_depth_copy.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_pipeline_cache.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
@@ -60,6 +61,9 @@ Rasterizer::~Rasterizer() = default;
 
 bool Rasterizer::FilterDraw() {
     const auto& regs = liverpool->regs;
+    if (TrySkateDepthCopy()) {
+        return false;
+    }
     if (regs.color_control.mode == AmdGpu::ColorControl::OperationMode::EliminateFastClear) {
         // Clears the render target if FCE is launched before any draws
         EliminateFastClear();
@@ -103,6 +107,53 @@ bool Rasterizer::FilterDraw() {
         return false;
     }
 
+    return true;
+}
+
+bool Rasterizer::TrySkateDepthCopy() {
+    const auto& regs = liverpool->regs;
+    if (Common::ElfInfo::Instance().GameSerial() != "CUSA37423" ||
+        !regs.depth_render_control.depth_copy ||
+        !IsSkateDepthCopyDraw(regs, AmdGpu::GetParams(regs.ps_program).hash)) {
+        return false;
+    }
+    const auto width = regs.screen_scissor.GetWidth();
+    const auto height = regs.screen_scissor.GetHeight();
+    const auto& viewport = regs.viewports[0];
+    const auto covers_target = [width, height](const AmdGpu::ViewportScissor& scissor) {
+        return scissor.window_offset_disable && scissor.top_left_x == 0 &&
+               scissor.top_left_y == 0 && scissor.bottom_right_x >= width &&
+               scissor.bottom_right_y >= height;
+    };
+    if (width == 0 || height == 0 || regs.screen_scissor.top_left_x != 0 ||
+        regs.screen_scissor.top_left_y != 0 || !covers_target(regs.window_scissor) ||
+        !covers_target(regs.generic_scissor) || viewport.xscale != float(width) / 2 ||
+        viewport.xoffset != float(width) / 2 || viewport.yscale != -float(height) / 2 ||
+        viewport.yoffset != float(height) / 2) {
+        return false;
+    }
+    VideoCore::TextureCache::ImageDesc src_desc{
+        regs.depth_buffer, regs.depth_view, regs.depth_control,
+        regs.depth_htile_data_base.GetAddress(), liverpool->last_db_extent};
+    VideoCore::TextureCache::ImageDesc dst_desc{regs.color_buffers[0],
+                                                liverpool->last_cb_extent[0]};
+    if (src_desc.info.size != VideoCore::Extent3D{width, height, 1} ||
+        dst_desc.info.size != src_desc.info.size) {
+        return false;
+    }
+    const auto src_id = texture_cache.FindImage(src_desc);
+    const auto dst_id = texture_cache.FindImage(dst_desc);
+    texture_cache.UpdateImage(src_id);
+    texture_cache.FindRenderTarget(dst_id, dst_desc);
+    if (!runtime.CopyDepthToColor(&texture_cache.GetImage(src_id),
+                                  &texture_cache.GetImage(dst_id))) {
+        return false;
+    }
+    texture_cache.TouchMeta(regs.color_buffers[0].CmaskAddress(), 0, false);
+    static bool reported{};
+    if (!std::exchange(reported, true)) {
+        LOG_WARNING(Render_Vulkan, "Applied skate. DEPTH_COPY to color workaround");
+    }
     return true;
 }
 
