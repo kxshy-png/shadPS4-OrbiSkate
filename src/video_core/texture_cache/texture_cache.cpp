@@ -286,8 +286,9 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         // Inherit image usage
         auto& new_image = slot_images[new_image_id];
         new_image.usage = cache_image.usage;
+        const bool src_has_gpu_data = cache_image.HasGpuValidData();
         if (new_info.num_samples == 1 &&
-            (new_info.size != cache_image.info.size ||
+            (!src_has_gpu_data || new_info.size != cache_image.info.size ||
              new_info.resources.layers > cache_image.info.resources.layers ||
              new_info.resources.levels > cache_image.info.resources.levels)) {
             RefreshImage(new_image);
@@ -295,7 +296,9 @@ ImageId TextureCache::ResolveDepthOverlap(const ImageInfo& requested_info, Bindi
         new_image.flags &= ~ImageFlagBits::Dirty;
         // When creating a depth buffer through overlap resolution don't clear it on first use.
         new_image.info.meta_info.htile_clear_mask = 0;
-        runtime.CopyColorAndDepth(&cache_image, &new_image);
+        if (src_has_gpu_data) {
+            runtime.CopyColorAndDepth(&cache_image, &new_image);
+        }
 
         // Free the cache image.
         FreeImage(cache_image_id);
@@ -552,8 +555,11 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
     auto& src_image = slot_images[image_id];
     auto& new_image = slot_images[new_image_id];
 
+    const bool src_has_gpu_data = src_image.HasGpuValidData();
     RefreshImage(new_image);
-    runtime.CopyImage(&src_image, &new_image);
+    if (src_has_gpu_data) {
+        runtime.CopyImage(&src_image, &new_image);
+    }
 
     if (src_image.binding.is_bound || src_image.binding.is_target) {
         src_image.binding.needs_rebind = 1u;
@@ -561,7 +567,9 @@ ImageId TextureCache::ExpandImage(const ImageInfo& info, ImageId image_id) {
 
     TrackImage(new_image_id);
     new_image.flags &= ~ImageFlagBits::Dirty;
-    new_image.flags |= src_image.flags & ImageFlagBits::GpuModified;
+    if (src_has_gpu_data) {
+        new_image.flags |= ImageFlagBits::GpuModified;
+    }
     FreeImage(image_id);
 
     return new_image_id;
