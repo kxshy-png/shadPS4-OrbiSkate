@@ -10,10 +10,11 @@
 
 #include <magic_enum/magic_enum.hpp>
 
+#include <algorithm>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <unordered_map>
-#include <queue>
 
 namespace Platform {
 
@@ -35,12 +36,15 @@ enum class InterruptId : u32 {
 using IrqHandler = std::function<void(InterruptId)>;
 
 struct IrqController {
-    void RegisterOnce(InterruptId irq, IrqHandler handler) {
+    u64 RegisterOnce(InterruptId irq, IrqHandler handler) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Invalid IRQ number");
         auto& ctx = irq_contexts.try_emplace(irq).first->second;
         std::unique_lock lock{ctx.m_lock};
-        ctx.one_time_subscribers.emplace(handler);
+        const u64 request_id = ++ctx.last_request_id;
+        ASSERT_MSG(request_id != 0, "IRQ request identifier exhausted");
+        ctx.one_time_subscribers.emplace_back(request_id, std::move(handler));
+        return request_id;
     }
 
     void Register(InterruptId irq, IrqHandler handler, void* uid) {
@@ -62,11 +66,19 @@ struct IrqController {
         ctx.persistent_handlers.erase(uid);
     }
 
-    void Signal(InterruptId irq) {
+    void Signal(InterruptId irq, u64 request_id = 0) {
         ASSERT_MSG(static_cast<u32>(irq) <= static_cast<u32>(InterruptId::InterruptIdMax),
                    "Unexpected IRQ signaled");
         auto& ctx = irq_contexts.try_emplace(irq).first->second;
         std::unique_lock lock{ctx.m_lock};
+
+        const auto handler = request_id == 0
+                                 ? ctx.one_time_subscribers.begin()
+                                 : std::ranges::find(ctx.one_time_subscribers, request_id,
+                                                     &std::pair<u64, IrqHandler>::first);
+        if (request_id != 0 && handler == ctx.one_time_subscribers.end()) {
+            return;
+        }
 
         LOG_TRACE(Core, "IRQ signaled: {}", magic_enum::enum_name(irq));
 
@@ -74,18 +86,17 @@ struct IrqController {
             h(irq);
         }
 
-        if (!ctx.one_time_subscribers.empty()) {
-            const auto& h = ctx.one_time_subscribers.front();
-            h(irq);
-
-            ctx.one_time_subscribers.pop();
+        if (handler != ctx.one_time_subscribers.end()) {
+            handler->second(irq);
+            ctx.one_time_subscribers.erase(handler);
         }
     }
 
 private:
     struct IrqContext {
         std::unordered_map<void*, IrqHandler> persistent_handlers{};
-        std::queue<IrqHandler> one_time_subscribers{};
+        std::deque<std::pair<u64, IrqHandler>> one_time_subscribers{};
+        u64 last_request_id{};
         std::mutex m_lock{};
     };
     std::unordered_map<InterruptId, IrqContext> irq_contexts{};
